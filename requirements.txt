@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+
+sqlalchemy
+psycopg2-binary
+alembic
+pika
+
+pytest
+pytest-cov
+httpx
+
+black
+flake8
+pylint
