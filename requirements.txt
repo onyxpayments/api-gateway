@@ -6,3 +6,4 @@ email-validator
 respx
 pytest
 pytest-asyncio
+black
