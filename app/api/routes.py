@@ -2,7 +2,6 @@ from fastapi import APIRouter, HTTPException
 import httpx
 
 from app.api.schemas import AuthorizationRequest, AuthorizationResponse
-from app.infraestructure.settings import settings
 
 router = APIRouter()
 
