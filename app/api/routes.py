@@ -14,7 +14,7 @@ def health() -> dict[str, str]:
 
 @router.post("/payments", response_model=AuthorizationResponse)
 async def create_payment(request: AuthorizationRequest):
-    orchestrator_url = 'http://payment-orchestrator-service:8001/transactions'
+    orchestrator_url = "http://payment-orchestrator-service:8001/transactions"
 
     try:
         async with httpx.AsyncClient() as client:
