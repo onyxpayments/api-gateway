@@ -42,7 +42,7 @@ async def create_payment(request: AuthorizationRequest):
             transaction_id=response_data["transaction_id"],
             provider_transaction_id=response_data["provider_transaction_id"],
             status=response_data["status"],
-            message=response_data["message"],
+            message=response_data.get("message"),
         )
 
     except KeyError as error:

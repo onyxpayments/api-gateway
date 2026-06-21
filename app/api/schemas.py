@@ -14,4 +14,4 @@ class AuthorizationResponse(BaseModel):
     transaction_id: str
     provider_transaction_id: str
     status: str
-    message: str
+    message: str | None = None
