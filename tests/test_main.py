@@ -11,10 +11,16 @@ from app.application.exceptions import (
 from app.application.results import PaymentSubmissionResult
 from app.application.use_cases.submit_payment import SubmitPaymentUseCase
 from app.bootstrap import (
+    get_gateway_access_policy,
     get_payment_request_gateway,
     get_submit_payment_use_case,
 )
 from app.main import app
+from app.infrastructure.security.access_policy import (
+    FixedWindowRateLimiter,
+    GatewayAccessPolicy,
+)
+from app.infrastructure.settings import Settings
 
 client = TestClient(app)
 
@@ -61,8 +67,37 @@ def override_submit_use_case(gateway):
     app.dependency_overrides[get_submit_payment_use_case] = lambda: use_case
 
 
+def authenticated_policy():
+    settings = Settings(
+        _env_file=None,
+        api_basic_auth_enabled=True,
+        api_basic_auth_username="merchant",
+        api_basic_auth_secret="secret-key",
+        rate_limit_enabled=False,
+    )
+    return GatewayAccessPolicy(
+        settings,
+        FixedWindowRateLimiter(60, 60),
+    )
+
+
 def test_health_returns_ok():
-    assert client.get("/health").json() == {"status": "ok"}
+    response = client.get(
+        "/health",
+        headers={"X-Correlation-ID": "merchant-request-123"},
+    )
+
+    assert response.json() == {"status": "ok"}
+    assert response.headers["X-Correlation-ID"] == "merchant-request-123"
+
+
+def test_invalid_correlation_id_is_replaced():
+    response = client.get(
+        "/health",
+        headers={"X-Correlation-ID": "invalid correlation id!"},
+    )
+
+    assert UUID(response.headers["X-Correlation-ID"])
 
 
 def test_liveness_returns_alive():
@@ -123,6 +158,36 @@ def test_submit_payment_routes_to_payment_request_service():
     assert command.amount == Decimal("10000.50")
     assert command.currency == "COP"
     assert command.notification_url == VALID_PAYLOAD["notification_url"]
+
+
+def test_submit_payment_rejects_missing_basic_credentials_when_enabled():
+    app.dependency_overrides[get_gateway_access_policy] = authenticated_policy
+
+    response = client.post("/payments", json=VALID_PAYLOAD)
+
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Basic"
+
+
+def test_submit_payment_accepts_encoded_basic_credentials():
+    payment_id = UUID(VALID_PAYLOAD["transaction_id"])
+    gateway = FakePaymentRequestGateway(
+        result=PaymentSubmissionResult(
+            payment_id=payment_id,
+            status="RECEIVED",
+            message="Accepted",
+        )
+    )
+    override_submit_use_case(gateway)
+    app.dependency_overrides[get_gateway_access_policy] = authenticated_policy
+
+    response = client.post(
+        "/payments",
+        json=VALID_PAYLOAD,
+        auth=("merchant", "secret-key"),
+    )
+
+    assert response.status_code == 202
 
 
 def test_submit_payment_rejects_invalid_payload():

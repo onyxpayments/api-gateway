@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.adapters.http import schemas
+from app.adapters.http.security import enforce_gateway_access
 from app.application.commands import SubmitPaymentCommand
 from app.application.exceptions import (
     InvalidPaymentRequestResponse,
@@ -21,6 +22,7 @@ router = APIRouter()
 )
 async def submit_payment(
     request: schemas.PaymentRequest,
+    _access: None = Depends(enforce_gateway_access),
     use_case: SubmitPaymentUseCase = Depends(get_submit_payment_use_case),
 ):
     command = SubmitPaymentCommand(

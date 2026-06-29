@@ -15,6 +15,10 @@ from app.domain.models import Customer
 from app.infrastructure.clients.payment_request_service import (
     HttpPaymentRequestGateway,
 )
+from app.infrastructure.observability.context import (
+    reset_correlation_id,
+    set_correlation_id,
+)
 from app.infrastructure.settings import Settings
 
 CLIENT_MODULE = "app.infrastructure.clients.payment_request_service"
@@ -52,7 +56,11 @@ async def test_client_submits_payment_request(mock_post):
     )
     gateway = HttpPaymentRequestGateway(Settings(_env_file=None))
 
-    result = await gateway.submit(command)
+    token = set_correlation_id("correlation-123")
+    try:
+        result = await gateway.submit(command)
+    finally:
+        reset_correlation_id(token)
 
     assert result.payment_id == command.payment_id
     assert result.status == "RECEIVED"
@@ -61,6 +69,9 @@ async def test_client_submits_payment_request(mock_post):
     assert mock_post.call_args.kwargs["json"]["notification_url"] == (
         command.notification_url
     )
+    assert mock_post.call_args.kwargs["headers"] == {
+        "X-Correlation-ID": "correlation-123"
+    }
 
 
 @pytest.mark.asyncio

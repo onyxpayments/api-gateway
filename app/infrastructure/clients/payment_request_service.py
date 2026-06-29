@@ -1,3 +1,5 @@
+import logging
+
 import httpx
 from pydantic import BaseModel, ValidationError
 from uuid import UUID
@@ -10,6 +12,12 @@ from app.application.exceptions import (
 )
 from app.application.results import PaymentSubmissionResult
 from app.infrastructure.settings import Settings
+from app.infrastructure.observability.context import (
+    CORRELATION_ID_HEADER,
+    get_correlation_id,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class PaymentRequestServiceResponse(BaseModel):
@@ -39,15 +47,22 @@ class HttpPaymentRequestGateway:
                 "personal_id": command.customer.personal_id,
             },
         }
+        correlation_id = get_correlation_id()
+        headers = {CORRELATION_ID_HEADER: correlation_id} if correlation_id else {}
 
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     url,
                     json=payload,
+                    headers=headers,
                     timeout=self.settings.payment_request_timeout_seconds,
                 )
         except httpx.RequestError as error:
+            logger.warning(
+                "payment_request_service_unavailable",
+                extra={"payment_id": str(command.payment_id)},
+            )
             raise PaymentRequestUnavailable(
                 "Could not reach payment request service"
             ) from error
@@ -57,6 +72,13 @@ class HttpPaymentRequestGateway:
                 detail = response.json()
             except ValueError:
                 detail = response.text
+            logger.warning(
+                "payment_request_service_rejected_request",
+                extra={
+                    "payment_id": str(command.payment_id),
+                    "upstream_status": response.status_code,
+                },
+            )
             raise PaymentRequestRejected(response.status_code, detail)
 
         try:
@@ -64,10 +86,24 @@ class HttpPaymentRequestGateway:
             validate = PaymentRequestServiceResponse.model_validate
             upstream = validate(response_body)
         except (ValueError, ValidationError) as error:
+            logger.error(
+                "payment_request_service_invalid_response",
+                extra={
+                    "payment_id": str(command.payment_id),
+                    "upstream_status": response.status_code,
+                },
+            )
             raise InvalidPaymentRequestResponse(
                 "Payment request service returned an invalid response"
             ) from error
 
+        logger.info(
+            "payment_request_forwarded",
+            extra={
+                "payment_id": str(command.payment_id),
+                "upstream_status": response.status_code,
+            },
+        )
         return PaymentSubmissionResult(
             payment_id=upstream.transaction_id,
             status=upstream.status,
