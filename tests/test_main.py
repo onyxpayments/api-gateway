@@ -1,17 +1,27 @@
-from unittest.mock import AsyncMock, patch
+from decimal import Decimal
+from uuid import UUID
 
-import httpx
 from fastapi.testclient import TestClient
 
+from app.application.exceptions import (
+    InvalidPaymentRequestResponse,
+    PaymentRequestRejected,
+    PaymentRequestUnavailable,
+)
+from app.application.results import PaymentSubmissionResult
+from app.application.use_cases.submit_payment import SubmitPaymentUseCase
+from app.bootstrap import (
+    get_payment_request_gateway,
+    get_submit_payment_use_case,
+)
 from app.main import app
 
 client = TestClient(app)
 
-
 VALID_PAYLOAD = {
     "transaction_id": "123e4567-e89b-12d3-a456-426614174000",
-    "amount": 10000,
-    "currency": "COP",
+    "amount": "10000.50",
+    "currency": "cop",
     "customer": {
         "first_name": "Juan",
         "last_name": "Bello",
@@ -20,128 +30,142 @@ VALID_PAYLOAD = {
 }
 
 
+class FakePaymentRequestGateway:
+    def __init__(self, result=None, error=None, ready=True):
+        self.result = result
+        self.error = error
+        self.ready = ready
+        self.commands = []
+
+    async def submit(self, command):
+        self.commands.append(command)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def is_ready(self):
+        return self.ready
+
+
+def setup_function():
+    app.dependency_overrides.clear()
+
+
+def teardown_function():
+    app.dependency_overrides.clear()
+
+
+def override_submit_use_case(gateway):
+    use_case = SubmitPaymentUseCase(gateway)
+    app.dependency_overrides[get_submit_payment_use_case] = lambda: use_case
+
+
 def test_health_returns_ok():
-    response = client.get("/health")
+    assert client.get("/health").json() == {"status": "ok"}
+
+
+def test_liveness_returns_alive():
+    assert client.get("/health/live").json() == {"status": "alive"}
+
+
+def test_startup_returns_started():
+    assert client.get("/health/startup").json() == {"status": "started"}
+
+
+def test_readiness_returns_ready_when_payment_request_is_ready():
+    gateway = FakePaymentRequestGateway(ready=True)
+    app.dependency_overrides[get_payment_request_gateway] = lambda: gateway
+
+    response = client.get("/health/ready")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {
+        "status": "ready",
+        "checks": {"payment_request_service": "up"},
+    }
 
 
-@patch("app.api.routes.httpx.AsyncClient.post", new_callable=AsyncMock)
-def test_create_payment_returns_pending_from_orchestrator(mock_post):
-    mock_post.return_value = httpx.Response(
-        status_code=200,
-        json={
-            "transaction_id": "123e4567-e89b-12d3-a456-426614174000",
-            "provider_transaction_id": "mock_123e4567-e89b-12d3-a456-426614174000",
-            "status": "PENDING",
-            "message": "Payment authorization is being processed",
-        },
+def test_readiness_returns_503_when_payment_request_is_unavailable():
+    gateway = FakePaymentRequestGateway(ready=False)
+    app.dependency_overrides[get_payment_request_gateway] = lambda: gateway
+
+    response = client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "not_ready",
+        "checks": {"payment_request_service": "down"},
+    }
+
+
+def test_submit_payment_routes_to_payment_request_service():
+    payment_id = UUID(VALID_PAYLOAD["transaction_id"])
+    gateway = FakePaymentRequestGateway(
+        result=PaymentSubmissionResult(
+            payment_id=payment_id,
+            status="RECEIVED",
+            message="Payment request accepted for processing",
+        )
     )
+    override_submit_use_case(gateway)
 
     response = client.post("/payments", json=VALID_PAYLOAD)
 
-    assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["transaction_id"] == VALID_PAYLOAD["transaction_id"]
-    assert data["provider_transaction_id"] == f"mock_{VALID_PAYLOAD['transaction_id']}"
-    assert data["status"] == "PENDING"
-    assert data["message"] == "Payment authorization is being processed"
-
-    mock_post.assert_called_once()
-
-    url = mock_post.call_args.args[0]
-    body = mock_post.call_args.kwargs["json"]
-
-    assert url.endswith("/transactions")
-    assert body["transaction_id"] == VALID_PAYLOAD["transaction_id"]
-    assert body["amount"] == VALID_PAYLOAD["amount"]
-    assert body["currency"] == VALID_PAYLOAD["currency"]
-    assert body["customer"]["first_name"] == "Juan"
-    assert body["customer"]["personal_id"] == "123456789"
-
-
-def test_create_payment_rejects_missing_customer():
-    payload = {
-        "transaction_id": "trx_123",
-        "amount": 10000,
-        "currency": "COP",
+    assert response.status_code == 202
+    assert response.json() == {
+        "transaction_id": str(payment_id),
+        "status": "RECEIVED",
+        "message": "Payment request accepted for processing",
     }
+    command = gateway.commands[0]
+    assert command.payment_id == payment_id
+    assert command.amount == Decimal("10000.50")
+    assert command.currency == "COP"
+
+
+def test_submit_payment_rejects_invalid_payload():
+    payload = {**VALID_PAYLOAD, "amount": 0}
 
     response = client.post("/payments", json=payload)
 
     assert response.status_code == 422
 
 
-def test_create_payment_rejects_missing_customer_personal_id():
-    payload = {
-        "transaction_id": "trx_123",
-        "amount": 10000,
-        "currency": "COP",
-        "customer": {
-            "first_name": "Juan",
-            "last_name": "Bello",
-        },
-    }
-
-    response = client.post("/payments", json=payload)
-
-    assert response.status_code == 422
-
-
-def test_create_payment_rejects_missing_currency():
-    payload = {
-        "transaction_id": "trx_123",
-        "amount": 10000,
-        "customer": {
-            "first_name": "Juan",
-            "last_name": "Bello",
-            "personal_id": "123456789",
-        },
-    }
-
-    response = client.post("/payments", json=payload)
-
-    assert response.status_code == 422
-
-
-@patch("app.api.routes.httpx.AsyncClient.post", new_callable=AsyncMock)
-def test_create_payment_returns_orchestrator_error(mock_post):
-    mock_post.return_value = httpx.Response(
-        status_code=400,
-        json={"detail": "Invalid transaction"},
-    )
-
-    response = client.post("/payments", json=VALID_PAYLOAD)
-
-    assert response.status_code == 400
-    assert response.json() == {"detail": {"detail": "Invalid transaction"}}
-
-
-@patch("app.api.routes.httpx.AsyncClient.post", new_callable=AsyncMock)
-def test_create_payment_returns_502_when_orchestrator_unavailable(mock_post):
-    mock_post.side_effect = httpx.RequestError("Connection failed")
+def test_submit_payment_returns_502_when_service_is_unavailable():
+    message = "Could not reach payment request service"
+    error = PaymentRequestUnavailable(message)
+    gateway = FakePaymentRequestGateway(error=error)
+    override_submit_use_case(gateway)
 
     response = client.post("/payments", json=VALID_PAYLOAD)
 
     assert response.status_code == 502
-    assert "Could not reach payment orchestrator" in response.json()["detail"]
+    assert response.json() == {"detail": message}
 
 
-@patch("app.api.routes.httpx.AsyncClient.post", new_callable=AsyncMock)
-def test_create_payment_returns_502_when_orchestrator_response_is_invalid(mock_post):
-    mock_post.return_value = httpx.Response(
-        status_code=200,
-        json={
-            "transaction_id": VALID_PAYLOAD["transaction_id"],
-            "status": "PENDING",
-            "message": "Payment authorization is being processed",
-        },
+def test_submit_payment_propagates_service_rejection():
+    gateway = FakePaymentRequestGateway(
+        error=PaymentRequestRejected(
+            status_code=503,
+            detail={"detail": "RabbitMQ unavailable"},
+        )
     )
+    override_submit_use_case(gateway)
+
+    response = client.post("/payments", json=VALID_PAYLOAD)
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"detail": "RabbitMQ unavailable"}}
+
+
+def test_submit_payment_returns_502_for_invalid_upstream_response():
+    gateway = FakePaymentRequestGateway(
+        error=InvalidPaymentRequestResponse(
+            "Payment request service returned an invalid response"
+        )
+    )
+    override_submit_use_case(gateway)
 
     response = client.post("/payments", json=VALID_PAYLOAD)
 
     assert response.status_code == 502
-    assert "Missing field" in response.json()["detail"]
