@@ -32,6 +32,7 @@ class HttpPaymentRequestGateway:
             "transaction_id": str(command.payment_id),
             "amount": str(command.amount),
             "currency": command.currency,
+            "notification_url": command.notification_url,
             "customer": {
                 "first_name": command.customer.first_name,
                 "last_name": command.customer.last_name,

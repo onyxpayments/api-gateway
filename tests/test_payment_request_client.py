@@ -26,6 +26,7 @@ def create_command():
         payment_id=uuid4(),
         amount=Decimal("10000.50"),
         currency="COP",
+        notification_url="https://merchant.example/webhooks/payments",
         customer=Customer(
             first_name="Juan",
             last_name="Bello",
@@ -57,6 +58,9 @@ async def test_client_submits_payment_request(mock_post):
     assert result.status == "RECEIVED"
     assert mock_post.call_args.args[0].endswith("/payments")
     assert mock_post.call_args.kwargs["json"]["amount"] == "10000.50"
+    assert mock_post.call_args.kwargs["json"]["notification_url"] == (
+        command.notification_url
+    )
 
 
 @pytest.mark.asyncio

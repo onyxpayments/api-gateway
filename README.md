@@ -2,67 +2,43 @@
 
 Public HTTP entry point for the OnyxPay payment platform.
 
-The API Gateway exposes a small client-facing API, validates incoming payloads,
-forwards payment requests to the Payment Request Service, and translates
-upstream failures into HTTP responses. It does not store transactions or
-communicate with payment providers directly.
+The gateway validates client requests, forwards them to the Payment Request
+Service, and translates upstream failures into stable HTTP responses. It does
+not persist transactions, publish RabbitMQ events, or call providers directly.
 
-## Responsibilities
-
-- Expose the public payment API.
-- Validate requests with Pydantic.
-- Forward valid requests to the Payment Request Service.
-- Return a stable response shape to clients.
-- Report upstream connectivity and contract errors.
-- Provide interactive OpenAPI documentation through FastAPI.
-
-## Request Flow
+## Flow
 
 ```text
 Client
-  │
   │ POST /payments
   ▼
 API Gateway
-  │
   │ POST /payments
   ▼
-Payment Request Service → RabbitMQ
+Payment Request Service
+  │ payment.requested.v1
+  ▼
+RabbitMQ
 ```
 
 ## API
 
-When the full platform is running through the infrastructure repository, the
-gateway is available at `http://localhost:8003`.
+With the full Compose stack running, the gateway is available at
+`http://localhost:8003`; the container listens on port `8002`.
 
-### Health Check
-
-```http
-GET /health
-```
-
-Response:
-
-```json
-{
-  "status": "ok"
-}
-```
-
-### Create Payment
+### Create a payment
 
 ```http
 POST /payments
 Content-Type: application/json
 ```
 
-Request:
-
 ```json
 {
   "transaction_id": "123e4567-e89b-12d3-a456-426614174000",
-  "amount": 10000,
+  "amount": "10000.50",
   "currency": "COP",
+  "notification_url": "https://merchant.example/webhooks/payments",
   "customer": {
     "first_name": "Juan",
     "last_name": "Bello",
@@ -71,15 +47,27 @@ Request:
 }
 ```
 
+Field rules:
+
+- `transaction_id` must be a UUID.
+- `amount` must be greater than zero.
+- `currency` must contain exactly three characters and is normalized to
+  uppercase.
+- `notification_url` is required and must be a valid HTTP or HTTPS URL.
+- Customer names and personal ID must be non-empty and respect their schema
+  length limits.
+- Unknown fields are rejected.
+
 Example:
 
 ```bash
-curl -X POST http://localhost:8003/payments \
-  -H "Content-Type: application/json" \
-  -d '{
+curl --request POST http://localhost:8003/payments \
+  --header "Content-Type: application/json" \
+  --data '{
     "transaction_id": "123e4567-e89b-12d3-a456-426614174000",
-    "amount": 10000,
+    "amount": "10000.50",
     "currency": "COP",
+    "notification_url": "https://merchant.example/webhooks/payments",
     "customer": {
       "first_name": "Juan",
       "last_name": "Bello",
@@ -102,25 +90,68 @@ HTTP/1.1 202 Accepted
 }
 ```
 
-The identifier supplied by the client becomes the payment identifier used in
-the asynchronous event flow.
+This response confirms that the downstream service accepted the request for
+asynchronous processing. It is not a final payment status.
 
-### Error Behavior
+### Error behavior
 
-- `422 Unprocessable Entity`: the request does not match the expected schema.
+- `422 Unprocessable Entity`: invalid client contract.
 - `502 Bad Gateway`: the Payment Request Service cannot be reached or returns
-  an invalid response.
-- Other upstream HTTP errors are returned with the service's status code.
+  an invalid success response.
+- Other upstream HTTP failures retain the upstream status and detail.
 
-Interactive API documentation:
+Interactive OpenAPI documentation is available at
+`http://localhost:8003/docs`.
 
-```text
-http://localhost:8003/docs
+## Configuration
+
+| Variable | Default |
+| --- | --- |
+| `PAYMENT_REQUEST_SERVICE_URL` | `http://payment-request-service:8003` |
+| `PAYMENT_REQUEST_TIMEOUT_SECONDS` | `10` |
+| `PAYMENT_REQUEST_HEALTH_TIMEOUT_SECONDS` | `2` |
+
+For a locally running Payment Request Service:
+
+```dotenv
+PAYMENT_REQUEST_SERVICE_URL=http://localhost:8004
 ```
 
-## Running the Full Platform
+## Health checks
 
-The recommended development path is the infrastructure repository:
+- `GET /health/live`: gateway process liveness.
+- `GET /health/startup`: application startup.
+- `GET /health/ready`: Payment Request Service readiness.
+- `GET /health`: backward-compatible basic check.
+
+## Local development
+
+Requirements: Python 3.13 and a reachable Payment Request Service.
+
+```bash
+make install
+make format
+make lint
+make test
+.venv/bin/uvicorn app.main:app --reload --port 8002
+```
+
+## Docker and Compose
+
+```bash
+docker build -t api-gateway .
+docker run --rm -p 8003:8002 \
+  -e PAYMENT_REQUEST_SERVICE_URL=http://host.docker.internal:8004 \
+  api-gateway
+```
+
+Published image:
+
+```text
+ghcr.io/onyxpayments/api-gateway:latest
+```
+
+Run the full platform from the infrastructure repository:
 
 ```bash
 cd ../infra
@@ -128,98 +159,27 @@ docker compose pull
 docker compose up -d
 ```
 
-The gateway uses the internal Compose address
-`http://payment-request-service:8003`.
-
-## Local Development
-
-Requirements:
-
-- Python 3.13
-- Make
-
-Install dependencies in a virtual environment:
-
-```bash
-make install
-```
-
-Run the service:
-
-```bash
-.venv/bin/uvicorn app.main:app --reload --port 8002
-```
-
-Run quality checks:
-
-```bash
-make format
-make lint
-make test
-```
-
-Set `PAYMENT_REQUEST_SERVICE_URL` when running outside the Compose network.
-
-## Docker
-
-Build and run the image:
-
-```bash
-docker build -t api-gateway .
-docker run --rm -p 8003:8002 api-gateway
-```
-
-The published platform image is:
-
-```text
-ghcr.io/onyxpayments/api-gateway:latest
-```
-
-## Project Structure
+## Project structure
 
 ```text
 .
 ├── app
-│   ├── adapters
-│   │   └── http            # FastAPI routes, schemas and health probes
-│   ├── application
-│   │   ├── use_cases       # Submit payment orchestration
-│   │   ├── commands.py
-│   │   ├── exceptions.py
-│   │   ├── ports.py
-│   │   └── results.py
-│   ├── domain              # Transport-independent payment models
+│   ├── adapters/http          # Public routes, schemas, and health checks
+│   ├── application           # Submit command, use case, ports, and results
+│   ├── domain                # Transport-independent request models
 │   ├── infrastructure
-│   │   ├── clients         # Payment Request Service HTTP adapter
+│   │   ├── clients           # Payment Request Service HTTP adapter
 │   │   └── settings.py
-│   ├── bootstrap.py        # Dependency composition
+│   ├── bootstrap.py
 │   └── main.py
-├── tests                   # API, use-case and client adapter tests
+├── tests
 ├── Dockerfile
 ├── makefile
 └── requirements.txt
 ```
 
-## CI/CD
+## Current limitations
 
-GitHub Actions runs formatting checks, tests, and a Docker build on pull
-requests and pushes to `main`. Pushes to `main` publish two images to GitHub
-Container Registry:
-
-```text
-ghcr.io/onyxpayments/api-gateway:latest
-ghcr.io/onyxpayments/api-gateway:<commit-sha>
-```
-
-## Current Limitations
-
-- Authentication, authorization, rate limiting, and idempotency are not
-  implemented.
-- The gateway does not currently emit structured application logs.
-
-## Health probes
-
-- `GET /health/live` checks that the API process can respond.
-- `GET /health/startup` confirms application startup completed.
-- `GET /health/ready` checks that the Payment Request Service is ready.
-- `GET /health` remains available for backward compatibility.
+- Authentication, authorization, rate limiting, and request idempotency are
+  not implemented.
+- CORS is not configured for arbitrary browser origins.

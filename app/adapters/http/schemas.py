@@ -1,7 +1,7 @@
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 
 class ApiSchema(BaseModel):
@@ -18,6 +18,7 @@ class PaymentRequest(ApiSchema):
     transaction_id: UUID
     amount: Decimal = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
+    notification_url: HttpUrl
     customer: CustomerRequest
 
     @field_validator("currency")

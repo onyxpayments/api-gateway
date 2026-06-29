@@ -22,6 +22,7 @@ VALID_PAYLOAD = {
     "transaction_id": "123e4567-e89b-12d3-a456-426614174000",
     "amount": "10000.50",
     "currency": "cop",
+    "notification_url": "https://merchant.example/webhooks/payments",
     "customer": {
         "first_name": "Juan",
         "last_name": "Bello",
@@ -121,10 +122,20 @@ def test_submit_payment_routes_to_payment_request_service():
     assert command.payment_id == payment_id
     assert command.amount == Decimal("10000.50")
     assert command.currency == "COP"
+    assert command.notification_url == VALID_PAYLOAD["notification_url"]
 
 
 def test_submit_payment_rejects_invalid_payload():
     payload = {**VALID_PAYLOAD, "amount": 0}
+
+    response = client.post("/payments", json=payload)
+
+    assert response.status_code == 422
+
+
+def test_submit_payment_requires_notification_url():
+    payload = dict(VALID_PAYLOAD)
+    payload.pop("notification_url")
 
     response = client.post("/payments", json=payload)
 

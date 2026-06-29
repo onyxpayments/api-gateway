@@ -10,4 +10,5 @@ class SubmitPaymentCommand:
     payment_id: UUID
     amount: Decimal
     currency: str
+    notification_url: str
     customer: Customer
