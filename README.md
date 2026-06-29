@@ -117,9 +117,10 @@ constant-time comparisons. Missing or invalid credentials return `401` with a
 `WWW-Authenticate: Basic` response header.
 
 Basic authentication uses Base64 encoding, not encryption. It must only be
-enabled behind HTTPS. The browser demo keeps authentication disabled because
-a public SPA cannot safely store merchant credentials. Production merchants
-should call the Gateway from their backend.
+enabled behind HTTPS. The local browser demo enables it with development-only
+credentials supplied through `infra/.env`; never reuse those credentials in a
+shared or production environment. Production merchants should call the Gateway
+from their backend.
 
 Health endpoints and OpenAPI documentation remain public.
 
